@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Camera Interaction App</title>
+    <style>
+        /* General styling */
+        body {
+            font-family: sans-serif;
+            background-color: #f0f0f0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+        }
+
+        h1 {
+            color: #333;
+        }
+
+        /* Video feed styling */
+        #videoFeed {
+            width: 480px;
+            height: 360px;
+            border: 2px solid #333;
+            background-color: #000;
+            border-radius: 8px;
+        }
+
+        /* Panel styling */
+        .controls,
+        .io-areas {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            background-color: #fff;
+            padding: 15px 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            width: 100%;
+            max-width: 800px;
+        }
+
+        /* Row layout for control bar */
+        .controls-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        label {
+            font-weight: bold;
+        }
+
+        textarea,
+        input,
+        select {
+            font-size: 14px;
+            border-radius: 5px;
+            border: 1px solid #ccc;
+            padding: 8px;
+            width: 100%;
+            box-sizing: border-box;
+        }
+
+        textarea {
+            resize: vertical;
+        }
+
+        #startButton {
+            padding: 10px 20px;
+            font-size: 16px;
+            border: none;
+            border-radius: 5px;
+            color: white;
+            cursor: pointer;
+        }
+
+        #startButton.start {
+            background-color: #28a745;
+        }
+
+        #startButton.stop {
+            background-color: #dc3545;
+        }
+
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Camera Interaction App</h1>
+
+    <!-- Live webcam video feed -->
+    <video id="videoFeed" autoplay playsinline></video>
+    <canvas id="canvas" class="hidden"></canvas>
+
+    <!-- User configuration panel -->
+    <div class="io-areas">
+        <div>
+            <label for="baseURL">Base API URL:</label>
+            <input type="text" id="baseURL" value="http://localhost:8080" />
+        </div>
+
+        <div>
+            <label for="templateSelect">Prompt Template:</label>
+            <select id="templateSelect">
+                <option value="What do you see?">Describe scene</option>
+                <option value="List the objects in the image.">Detect objects</option>
+                <option value="Is there a human in the image?">Detect human presence</option>
+                <option value="Summarize this image like a tweet.">Summarize (Tweet Style)</option>
+                <option value="What's unusual in this image?">Find anomalies</option>
+                <option value="Custom">Custom...</option>
+            </select>
+        </div>
+
+        <div>
+            <label for="instructionText">Instruction:</label>
+            <textarea id="instructionText" rows="2">What do you see?</textarea>
+        </div>
+
+        <div>
+            <label for="responseText">Response:</label>
+            <textarea id="responseText" rows="2" readonly placeholder="Server response will appear here..."></textarea>
+        </div>
+    </div>
+
+    <!-- Capture controls -->
+    <div class="controls">
+        <div class="controls-row">
+            <label for="intervalSelect">Interval:</label>
+            <select id="intervalSelect">
+                <option value="100">100ms</option>
+                <option value="250">250ms</option>
+                <option value="500" selected>500ms</option>
+                <option value="1000">1s</option>
+                <option value="2000">2s</option>
+            </select>
+
+            <button id="startButton" class="start">Start</button>
+        </div>
+    </div>
+
+    <script>
+        // DOM elements
+        const video = document.getElementById('videoFeed');
+        const canvas = document.getElementById('canvas');
+        const baseURL = document.getElementById('baseURL');
+        const instructionText = document.getElementById('instructionText');
+        const responseText = document.getElementById('responseText');
+        const intervalSelect = document.getElementById('intervalSelect');
+        const startButton = document.getElementById('startButton');
+        const templateSelect = document.getElementById('templateSelect');
+
+        let stream, intervalId, isProcessing = false;
+
+        // Change prompt when user selects a template
+        templateSelect.addEventListener('change', () => {
+            const selected = templateSelect.value;
+            if (selected === "Custom") {
+                instructionText.readOnly = false;
+                instructionText.value = "";
+                instructionText.focus();
+            } else {
+                instructionText.readOnly = true;
+                instructionText.value = selected;
+            }
+        });
+
+        // Send prompt and image to vision LLM endpoint
+        async function sendChatCompletionRequest(instruction, imageBase64URL) {
+            try {
+                const response = await fetch(`${baseURL.value}/v1/chat/completions`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        max_tokens: 100,
+                        messages: [{
+                            role: 'user',
+                            content: [
+                                { type: 'text', text: instruction },
+                                { type: 'image_url', image_url: { url: imageBase64URL } }
+                            ]
+                        }]
+                    })
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.text();
+                    return `Server error: ${response.status} - ${errorData}`;
+                }
+
+                const data = await response.json();
+                return data.choices[0].message.content;
+            } catch (err) {
+                return `Request failed: ${err.message}`;
+            }
+        }
+
+        // Initialize the webcam
+        async function initCamera() {
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                video.srcObject = stream;
+                responseText.value = "Camera access granted. Ready to start.";
+            } catch (err) {
+                responseText.value = `Camera access error: ${err.message}`;
+                alert("Camera permission is required. Ensure you're using HTTPS or localhost.");
+            }
+        }
+
+        // Capture an image from the video feed
+        function captureImage() {
+            if (!stream || !video.videoWidth) return null;
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            const context = canvas.getContext('2d');
+            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+            return canvas.toDataURL('image/jpeg', 0.8);
+        }
+
+        // Repeatedly send images at configured interval
+        async function sendData() {
+            if (!isProcessing) return;
+            const instruction = instructionText.value;
+            const imageBase64URL = captureImage();
+            if (!imageBase64URL) {
+                responseText.value = "Failed to capture image.";
+                return;
+            }
+            const result = await sendChatCompletionRequest(instruction, imageBase64URL);
+            responseText.value = result;
+        }
+
+        // Start capturing at interval
+        function handleStart() {
+            if (!stream) {
+                alert("Camera not available. Please allow permission.");
+                return;
+            }
+
+            isProcessing = true;
+            startButton.textContent = "Stop";
+            startButton.classList.replace('start', 'stop');
+            instructionText.disabled = true;
+            intervalSelect.disabled = true;
+            responseText.value = "Processing started...";
+
+            const interval = parseInt(intervalSelect.value, 10);
+            sendData();  // Immediate first request
+            intervalId = setInterval(sendData, interval);
+        }
+
+        // Stop processing
+        function handleStop() {
+            isProcessing = false;
+            clearInterval(intervalId);
+            intervalId = null;
+
+            startButton.textContent = "Start";
+            startButton.classList.replace('stop', 'start');
+            instructionText.disabled = false;
+            intervalSelect.disabled = false;
+            responseText.value = "Processing stopped.";
+        }
+
+        // Toggle start/stop
+        startButton.addEventListener('click', () => {
+            isProcessing ? handleStop() : handleStart();
+        });
+
+        // Initialize on page load
+        window.addEventListener('DOMContentLoaded', initCamera);
+
+        // Cleanup on exit
+        window.addEventListener('beforeunload', () => {
+            if (stream) stream.getTracks().forEach(track => track.stop());
+            if (intervalId) clearInterval(intervalId);
+        });
+    </script>
+</body>
+
+</html>
